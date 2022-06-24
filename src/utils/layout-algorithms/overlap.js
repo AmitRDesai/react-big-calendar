@@ -14,32 +14,25 @@ class Event {
     this.data = data
   }
 
+  // depth of tree
+  get depth() {
+    if (this.children) {
+      return Math.max(...this.children.map((child) => child.depth)) + 1
+    }
+    return 1
+  }
+
   /**
    * The event's width without any overlap.
    */
   get _width() {
-    // The container event's width is determined by the maximum number of
-    // events in any of its rows.
-    if (this.rows) {
-      const columns =
-        this.rows.reduce(
-          (max, row) => Math.max(max, row.leaves.length + 1), // add itself
-          0
-        ) + 1 // add the container
-
-      return 100 / columns
+    // The parent event's width is determined by depth of tree.
+    const availableWidth =
+      100 - (this.parent ? this.parent._width + this.parent.xOffset : 0)
+    if (this.children) {
+      return availableWidth / this.depth
     }
-
-    const availableWidth = 100 - this.container._width
-
-    // The row event's width is the space left by the container, divided
-    // among itself and its leaves.
-    if (this.leaves) {
-      return availableWidth / (this.leaves.length + 1)
-    }
-
-    // The leaf event's width is determined by its row's width
-    return this.row._width
+    return availableWidth
   }
 
   /**
@@ -48,48 +41,19 @@ class Event {
    */
   get width() {
     const noOverlap = this._width
-    const overlap = Math.min(100, this._width * 1.7)
+    const overlap = Math.min(100, noOverlap * 1.7)
 
-    // Containers can always grow.
-    if (this.rows) {
+    // parents can always grow.
+    if (this.children) {
       return overlap
     }
-
-    // Rows can grow if they have leaves.
-    if (this.leaves) {
-      return this.leaves.length > 0 ? overlap : noOverlap
-    }
-
-    // Leaves can grow unless they're the last item in a row.
-    const { leaves } = this.row
-    const index = leaves.indexOf(this)
-    return index === leaves.length - 1 ? noOverlap : overlap
+    return noOverlap
   }
 
   get xOffset() {
-    // Containers have no offset.
-    if (this.rows) return 0
-
-    // Rows always start where their container ends.
-    if (this.leaves) return this.container._width
-
-    // Leaves are spread out evenly on the space left by its row.
-    const { leaves, xOffset, _width } = this.row
-    const index = leaves.indexOf(this) + 1
-    return xOffset + index * _width
+    // parent overlap with + parent offset
+    return this.parent ? this.parent._width + this.parent.xOffset : 0
   }
-}
-
-/**
- * Return true if event a and b is considered to be on the same row.
- */
-function onSameRow(a, b, minimumStartDifference) {
-  return (
-    // Occupies the same start slot.
-    Math.abs(b.start - a.start) < minimumStartDifference ||
-    // A's start slot overlaps with b's end slot.
-    (b.start > a.start && b.start < a.end)
-  )
 }
 
 function sortByRender(events) {
@@ -136,48 +100,44 @@ export default function getStyledEvents({
   const eventsInRenderOrder = sortByRender(proxies)
 
   // Group overlapping events, while keeping order.
-  // Every event is always one of: container, row or leaf.
-  // Containers can contain rows, and rows can contain leaves.
-  const containerEvents = []
-  for (let i = 0; i < eventsInRenderOrder.length; i++) {
-    const event = eventsInRenderOrder[i]
+  // Create tree for overlapping events.
+  let eventsCopy = [...eventsInRenderOrder]
+  let parentEvents = []
+  // iterate over to create sub-trees
+  do {
+    // remove remove top level parents for current iteration
+    eventsCopy = eventsCopy.filter((event) => !parentEvents.includes(event))
+    parentEvents = []
+    for (let i = 0; i < eventsCopy.length; i++) {
+      const event = eventsCopy[i]
 
-    // Check if this event can go into a container event.
-    const container = containerEvents.find(
-      (c) =>
-        c.end > event.start ||
-        Math.abs(event.start - c.start) < minimumStartDifference
-    )
+      // Check if this event can go into a parent event.
+      const parent = parentEvents.find(
+        (c) =>
+          c.end > event.start ||
+          Math.abs(event.start - c.start) < minimumStartDifference
+      )
 
-    // Couldn't find a container — that means this event is a container.
-    if (!container) {
-      event.rows = []
-      containerEvents.push(event)
-      continue
-    }
-
-    // Found a container for the event.
-    event.container = container
-
-    // Check if the event can be placed in an existing row.
-    // Start looking from behind.
-    let row = null
-    for (let j = container.rows.length - 1; !row && j >= 0; j--) {
-      if (onSameRow(container.rows[j], event, minimumStartDifference)) {
-        row = container.rows[j]
+      // Couldn't find a parent — that means this event is a parent.
+      if (!parent) {
+        parentEvents.push(event)
+        continue
       }
-    }
 
-    if (row) {
-      // Found a row, so add it.
-      row.leaves.push(event)
-      event.row = row
-    } else {
-      // Couldn't find a row – that means this event is a row.
-      event.leaves = []
-      container.rows.push(event)
+      // Found a parent for the event.
+      event.parent = parent
+      // event from parent clild list
+      if (parent.parent) {
+        parent.parent.children = parent.parent.children.filter(
+          (e) => e !== event
+        )
+      }
+      if (!parent.children) {
+        parent.children = []
+      }
+      parent.children.push(event)
     }
-  }
+  } while (parentEvents.length > 0)
 
   // Return the original events, along with their styles.
   return eventsInRenderOrder.map((event) => ({
